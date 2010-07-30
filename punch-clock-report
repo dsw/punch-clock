@@ -1,0 +1,287 @@
+#!/usr/bin/python
+# -*-python-*-
+
+# punch-clock-report version 2010-07-29 (same as version 2008-09-23
+# but the file names and the database directory name have changed)
+
+# Reads the punch-clock database and produce a report.  See the end of
+# the file for the copyright and license.
+
+# Daniel S. Wilkerson
+
+# libraries
+import sys, os
+import re
+import optparse
+import datetime
+
+# defaults
+default_db = '%s/punch-clock-db' % os.environ.get('HOME')
+
+# get the time now
+utcnow = datetime.datetime.utcnow()
+# Ugh.  There has to be a better way.
+(utcnow_year, utcnow_month, utcnow_day, utcnow_hour, utcnow_minute,
+ utcnow_second, utcnow_weekday, utcnow_yearday, utcnow_dstflag
+ ) = utcnow.timetuple()
+# FIX: share this with punch-clock
+yearformat = '%04d'
+monthformat = '%02d'
+utcnow_year_str = yearformat % utcnow_year
+utcnow_month_str = monthformat % utcnow_month
+
+# usage
+usage = """
+punch-clock-report is a program for generating reports from a punch-clock
+database.
+
+The syntax is:
+    punch-clock-report OPTIONS
+
+Where OPTIONS are:
+    --proj=project-name ; project name to file this entry under ; required
+    --year=yyyy         ; year to report, defaults to this year ; optional
+    --month=mm          ; month to report, defaults to this month ; optional
+    --rate=dollars-per-hour ; multiplied by time if given       ; optional
+    --db=database-name  ; database dir [%s] ; optional
+    --debug             ; if given, print to stdout instead     ; optional
+
+Note: All times are recorded and printed as UTC, so this might cause a
+few hours to go into another month at a month boundary.  If you work
+across a month boundary, you will have to manually insert a start and
+stop record into the database for midnight at the month boundary.
+
+Examples:
+    punch-clock-report --proj=whitherspoon
+    punch-clock-report --proj=whitherspoon --month=09 --year=2008
+""" % default_db
+
+def abort(message=None):
+    print
+    if message:
+        print message
+    print usage
+    exit(1)
+
+# configuration
+class Config:
+
+    def parse_arguments(self):
+        if len(sys.argv) <= 1: abort()
+        parser = optparse.OptionParser()
+        parser.add_option('--proj')
+        parser.add_option('--year', default=utcnow_year_str)
+        parser.add_option('--month', default=utcnow_month_str)
+        parser.add_option('--rate')
+        parser.add_option('--db', default=default_db)
+        parser.add_option('--debug', action='store_true')
+        # note that I pass sys.argv manually because by default the
+        # arugment is sys.argv with the first element ignored, but I have
+        # already ignored it above
+        self.opt, self.arguments = parser.parse_args(sys.argv)
+        self.arguments = self.arguments[1:]
+
+    def assert_integrity(self):
+        if self.opt.proj == None:
+            abort("A proj argument is required.")
+        if len(self.arguments) > 0:
+            abort("Spurious arguments found: %s" % self.arguments)
+
+# routines
+
+def fmt_line(dt0, com, notation):
+    return 'UTC-%s %s%s' % (dt0.isoformat('/'), com, notation)
+
+# actually do the accounting
+class Count_Consumer:
+
+    def __init__(self, filename):
+        self.filename = filename
+        self.dt = None                    # we are not in an interval
+        self.total = datetime.timedelta() # defaults to 0
+
+    # make a datetime object from the parts
+    def make_datetime(self, parts):
+        (year, month, day, hour, minute, second) = (
+            parts['year'], parts['month'], parts['day'],
+            parts['hour'], parts['minute'], parts['second'])
+
+        # check years
+        if year != config.opt.year:
+            message = "Years don't match: line '%s', config '%s'" % (
+                year, config.opt.year)
+            raise Exception, message
+        # check months
+        if month != config.opt.month:
+            message = "Months don't match: line '%s', config '%s'" % (
+                month, config.opt.month)
+            raise Exception, message
+
+        # make a datetime
+        return datetime.datetime(int(year), int(month), int(day),
+                                 int(hour), int(minute), int(second))
+
+    # return whether we are currently within an interval
+    def within_interval(self):
+        return self.dt != None
+
+    # consume the parts of a line; linenumber is for error reporting
+    def feed(self, parts, linenumber):
+        filename = self.filename
+        com = parts['com']
+        notation = parts['notation']
+        if not notation: notation = ''
+        else: notation = ': %s' % notation
+        dt0 = self.make_datetime(parts)
+
+        # dispatch on the command
+        if False: pass          # orthogonality
+
+        elif com == 'start':
+            if self.within_interval():
+                message = 'Start encountered when already in an interval.'
+                raise Exception, "%s:%d: %s" % (filename, linenumber, message)
+            self.dt = dt0
+            print fmt_line(dt0, com, notation)
+
+        elif com == 'stop':
+            if not self.within_interval():
+                message = 'Stop encountered when not in an interval.'
+                raise Exception, "%s:%d: %s" % (filename, linenumber, message)
+            print fmt_line(dt0, com, notation)
+            # compute the time difference
+            timedelta0 = dt0 - self.dt
+            self.dt = None
+            if timedelta0.days > 0:
+                raise Exception, "You worked for over a day without a break?"
+            print '\tdelta %s\n' % timedelta0
+            self.total += timedelta0
+
+        elif com == 'note':
+            if not self.within_interval():
+                message = 'Note encountered when not in an interval.'
+                raise Exception, "%s:%d: %s" % (filename, linenumber, message)
+            print fmt_line(dt0, com, notation)
+
+        else:
+            message = 'Unknown command.'
+            raise Exception, '%s:%d: %s' % (filename, linenumber, message)
+
+# regular expressions for line parsing
+def make_parse_line_re():
+    # UTC-2008-09-23/04:13:14 start: this is a note
+    date_re_str = r'UTC-(?P<year>\d\d\d\d)-(?P<month>\d\d)-(?P<day>\d\d)'
+    time_re_str = r'(?P<hour>\d\d):(?P<minute>\d\d):(?P<second>\d\d)'
+    command_re_str = r'(?P<com>start|stop|note)'
+    notation_re_str = r': (?P<notation>.*)'
+    parse_line_re_str = r'^%s/%s %s(?:%s)?$' % (
+        date_re_str, time_re_str, command_re_str, notation_re_str)
+    return re.compile(parse_line_re_str)
+
+parse_comment_re = re.compile(r'^#')
+parse_line_re = make_parse_line_re()
+def parse_one_line(filename, consumer, line):
+    # strip left whitespace
+    line = line.lstrip()
+    # skip blank lines
+    if len(line) == 0:
+        return None
+    # skip commented out lines
+    if parse_comment_re.match(line):
+#         print 'SKIPPING %s' % line
+        return None
+    # parse the line
+    parsematch = parse_line_re.match(line)
+    if not parsematch:
+        raise Exception, 'LINE DOES NOT PARSE: %s' % line
+    # get the parts
+    return parsematch.groupdict()
+    
+def parse_database(filename, consumer):
+    # Note: the 'U' means 'translate any combination of \n and \r into
+    # a newline'
+    dbfile = open(filename, 'rU')
+    linenumber = 0
+    for line in dbfile:
+        linenumber += 1
+        parts = parse_one_line(filename, consumer, line)
+        if parts != None:
+            consumer.feed(parts, linenumber)
+    if consumer.within_interval():
+        raise Exception, "%s:%d: File ended within an interval." % (
+            filename, linenumber)
+    dbfile.close()
+
+def database_filename():
+    return "%s/%s-%s-%s" % (
+        config.opt.db,
+        config.opt.proj,
+        config.opt.year,
+        config.opt.month)
+
+def print_introduction():
+    print 'Time report for project: %s, year-month: %s-%s.' % (
+        config.opt.proj, config.opt.year, config.opt.month)
+    print '''
+Note that all times are UTC.  This may cause times near month
+boundaries to be recorded and therefore reported on another month than
+you expect given your local timezone.
+'''
+
+def print_grand_total(consumer):
+    hours = consumer.total.seconds / 3600.0
+    print 'Grand Total == %s == %f hours.' % (
+        consumer.total, hours)
+    if config.opt.rate:
+        rate = float(config.opt.rate)
+        dollars = hours * rate
+        print 'Amount == %f hours * %.2f dollars/hour == %.2f dollars.' % (
+            hours, rate, dollars)
+
+# main
+config = Config()
+def main():
+    config.parse_arguments()
+    config.assert_integrity()
+    print_introduction()
+    filename = database_filename()
+    consumer = Count_Consumer(filename)
+    parse_database(filename, consumer)
+    print_grand_total(consumer)
+
+if __name__ == '__main__':
+    main()
+
+# License:
+#
+# Copyright (c) 2008, Daniel S. Wilkerson
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+#   Redistributions of source code must retain the above copyright
+#   notice, this list of conditions and the following disclaimer.
+#
+#   Redistributions in binary form must reproduce the above copyright
+#   notice, this list of conditions and the following disclaimer in
+#   the documentation and/or other materials provided with the
+#   distribution.
+#
+#   Neither the name of the Daniel S. Wilkerson nor the names of its
+#   contributors may be used to endorse or promote products derived
+#   from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+# FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+# COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+# ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.

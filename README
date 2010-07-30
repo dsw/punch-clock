@@ -1,0 +1,11 @@
+                             punch-clock
+                         Daniel S. Wilkerson
+
+The punch-clock tool tracks your time as you start and stop work on a
+project.  It records its state to a file in your filesystem in a
+simple, human-readable and editable format.
+
+The punch-clock-report tool will generate a report from this database.
+
+Both tools are released under a BSD-like license which you can see in
+the comments in the program files.
